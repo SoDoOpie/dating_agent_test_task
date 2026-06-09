@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
@@ -33,6 +33,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 CLAUDE_MODELS = {
+    "supervisor": "claude-sonnet-4-6",
     "insta_reader": "claude-haiku-4-5-20251001",
     "interest_profiler": "claude-sonnet-4-6",
     "show_matcher": "claude-sonnet-4-6",
@@ -79,6 +80,27 @@ MOCK_INSTAGRAM: Dict[str, Any] = {
 # Prompts
 # ---------------------------------------------------------------------------
 
+SUPERVISOR_SYSTEM = """You are a supervisor orchestrating a TV show recommendation pipeline.
+You decide which agent to run next based on the current state.
+
+Agents available:
+- insta_reader      : fetches Instagram profile data (bio, posts, hashtags)
+- interest_profiler : builds a psychographic profile from Instagram data
+- show_matcher      : recommends top-3 shows from the catalog
+- streaming_checker : filters recommendations to Netflix/HBO only
+- __end__           : pipeline is complete, stop
+
+Rules:
+1. Run agents in order: insta_reader → interest_profiler → show_matcher → streaming_checker → __end__
+2. Skip any agent whose output is already present in the state.
+3. If filtered_recommendations is an empty list AND retry_count < 2, go back to show_matcher
+   (it will try different picks). Increment retry_count in that case.
+4. If filtered_recommendations is set and non-empty, or retry_count >= 2, output __end__.
+
+Respond with ONLY a JSON object, no other text:
+{"next": "<agent_name>", "retry_count": <current_retry_count>}
+"""
+
 INTEREST_PROFILER_SYSTEM = """You are an expert psychographic analyst.
 Analyze the Instagram profile data and return ONLY a JSON object:
 {
@@ -124,26 +146,33 @@ def _extract_json(text: str) -> Any:
 # ---------------------------------------------------------------------------
 
 def supervisor_node(state: AppState) -> Dict[str, Any]:
-    """Central router: decide which agent runs next based on current state."""
-    if state.get("instagram_data") is None:
-        return {"next": "insta_reader"}
-    if state.get("interest_profile") is None:
-        return {"next": "interest_profiler"}
-    if state.get("recommendations") is None:
-        return {"next": "show_matcher"}
-    if state.get("filtered_recommendations") is None:
-        return {"next": "streaming_checker"}
-    # Retry if everything was filtered out and retries remain
-    if not state["filtered_recommendations"] and state.get("retry_count", 0) < MAX_RETRIES:
-        print(f"[SUPERVISOR] No shows passed the filter — retrying show_matcher "
-              f"(attempt {state['retry_count'] + 1}/{MAX_RETRIES})")
-        return {
-            "next": "show_matcher",
-            "recommendations": None,
-            "filtered_recommendations": None,
-            "retry_count": state.get("retry_count", 0) + 1,
-        }
-    return {"next": "__end__"}
+    """LLM-based supervisor: reasons about current state and picks next agent."""
+    llm = ChatAnthropic(model=CLAUDE_MODELS["supervisor"], temperature=0)
+
+    state_summary = {
+        "username": state.get("username"),
+        "instagram_data_present": state.get("instagram_data") is not None,
+        "interest_profile_present": state.get("interest_profile") is not None,
+        "recommendations_count": len(state.get("recommendations") or []),
+        "filtered_recommendations": state.get("filtered_recommendations"),
+        "retry_count": state.get("retry_count", 0),
+    }
+
+    response = llm.invoke([
+        SystemMessage(content=SUPERVISOR_SYSTEM),
+        HumanMessage(content=f"Current state:\n{json.dumps(state_summary, indent=2)}"),
+    ])
+
+    decision = _extract_json(response.content)
+    result: Dict[str, Any] = {"next": decision["next"]}
+
+    # If supervisor decided to retry show_matcher, reset relevant state fields
+    if decision["next"] == "show_matcher" and state.get("filtered_recommendations") is not None:
+        result["recommendations"] = None
+        result["filtered_recommendations"] = None
+        result["retry_count"] = decision.get("retry_count", state.get("retry_count", 0))
+
+    return result
 
 
 def insta_reader_node(state: AppState) -> Dict[str, Any]:
