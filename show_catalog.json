@@ -1,0 +1,44 @@
+[
+  {
+    "title": "Mindhunter",
+    "genres": ["crime", "psychological", "drama"],
+    "vibes": ["dark", "intellectual", "moody"],
+    "platforms": ["Netflix"],
+    "why": "Deep conversations guaranteed after each episode."
+  },
+  {
+    "title": "The Queen's Gambit",
+    "genres": ["drama", "character", "period"],
+    "vibes": ["stylish", "emotional", "ambitious"],
+    "platforms": ["Netflix"],
+    "why": "Elegant visuals and a strong character arc."
+  },
+  {
+    "title": "True Detective",
+    "genres": ["crime", "mystery", "drama"],
+    "vibes": ["dark", "philosophical", "atmospheric"],
+    "platforms": ["HBO"],
+    "why": "Intense atmosphere for a memorable evening."
+  },
+  {
+    "title": "Succession",
+    "genres": ["drama", "satire", "business"],
+    "vibes": ["sharp", "luxury", "ambitious"],
+    "platforms": ["HBO"],
+    "why": "Witty dialogue and discussion-worthy characters."
+  },
+  {
+    "title": "Black Mirror",
+    "genres": ["scifi", "anthology", "thriller"],
+    "vibes": ["provocative", "modern", "tech"],
+    "platforms": ["Netflix"],
+    "why": "Great for debating modern life and technology."
+  },
+  {
+    "title": "The Expanse",
+    "genres": ["scifi", "politics", "adventure"],
+    "vibes": ["epic", "smart", "high-stakes"],
+    "platforms": ["Prime"],
+    "why": "Big world-building and exciting momentum."
+  }
+]
