@@ -22,9 +22,11 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
+from langchain_core.runnables.graph import MermaidDrawMethod
 
 load_dotenv()
 
@@ -45,6 +47,21 @@ MAX_RETRIES = 2
 
 with open(os.path.join(os.path.dirname(__file__), "show_catalog.json"), encoding="utf-8") as _f:
     SHOW_CATALOG: List[Dict[str, Any]] = json.load(_f)
+
+
+@tool
+def check_show_streaming(title: str) -> str:
+    """Look up a show title in the catalog and return its streaming platforms."""
+    for show in SHOW_CATALOG:
+        if show.get("title", "").lower() == title.lower():
+            platforms = show.get("platforms", [])
+            available = [p for p in platforms if p in ACTIVE_SUBSCRIPTIONS]
+            return json.dumps({
+                "title": show["title"],
+                "all_platforms": platforms,
+                "available_on_subscriptions": available,
+            })
+    return json.dumps({"title": title, "all_platforms": [], "available_on_subscriptions": [], "note": "not in catalog"})
 
 MOCK_INSTAGRAM: Dict[str, Any] = {
     "@art_girl": {
@@ -100,6 +117,14 @@ Rules:
 Respond with ONLY a JSON object, no other text:
 {"next": "<agent_name>", "retry_count": <current_retry_count>}
 """
+
+STREAMING_CHECKER_SYSTEM = """You are a streaming availability checker.
+For each recommended show call the check_show_streaming tool to find its platforms.
+Active subscriptions: Netflix, HBO.
+After checking every title return ONLY a JSON array of shows that are available
+on at least one active subscription:
+[{"title": "...", "platforms": ["..."], "reason": "..."}]
+Never include shows unavailable on Netflix or HBO."""
 
 INTEREST_PROFILER_SYSTEM = """You are an expert psychographic analyst.
 Analyze the Instagram profile data and return ONLY a JSON object:
@@ -220,14 +245,55 @@ def show_matcher_node(state: AppState) -> Dict[str, Any]:
 
 
 def streaming_checker_node(state: AppState) -> Dict[str, Any]:
-    """Filter recommendations to only those on active subscriptions."""
+    """Tool-equipped LLM node: calls check_show_streaming for each recommendation."""
     writer = get_stream_writer()
     writer({"status": f"Checking availability on {', '.join(sorted(ACTIVE_SUBSCRIPTIONS))}..."})
+
     recs = state["recommendations"] or []
-    filtered = [
-        r for r in recs
-        if any(p in ACTIVE_SUBSCRIPTIONS for p in r.get("platforms", []))
+    llm = ChatAnthropic(model=CLAUDE_MODELS["streaming_checker"], temperature=0)
+    model_with_tools = llm.bind_tools([check_show_streaming])
+
+    messages = [
+        SystemMessage(content=STREAMING_CHECKER_SYSTEM),
+        HumanMessage(
+            content=(
+                f"Check streaming availability for these shows:\n"
+                f"{json.dumps(recs, indent=2)}\n\n"
+                f"Use check_show_streaming for every title, then return the filtered JSON array."
+            )
+        ),
     ]
+
+    # ReAct loop (Pattern 5: Tool Use)
+    last_response = None
+    for _ in range(len(recs) + 3):
+        response = model_with_tools.invoke(messages)
+        messages.append(response)
+        last_response = response
+
+        if not response.tool_calls:
+            break
+
+        for tc in response.tool_calls:
+            tool_result = check_show_streaming.invoke(tc["args"])
+            messages.append(ToolMessage(content=str(tool_result), tool_call_id=tc["id"]))
+
+    filtered = []
+    if last_response and last_response.content:
+        try:
+            content = last_response.content
+            # content can be a list of blocks (e.g. [{"type": "text", "text": "..."}])
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in content
+                )
+            parsed = _extract_json(content)
+            if isinstance(parsed, list):
+                filtered = parsed
+        except (ValueError, json.JSONDecodeError):
+            pass
+
     writer({"status": f"{len(filtered)}/{len(recs)} shows available on your subscriptions."})
     return {"filtered_recommendations": filtered}
 
@@ -356,7 +422,10 @@ def main() -> None:
 
     state_snapshot: dict = dict(initial_state)
     current_llm_node: Optional[str] = None
-
+    app.get_graph().draw_mermaid_png(
+    draw_method=MermaidDrawMethod.API,
+    output_file_path="langgraph_graph.png"
+)
     for chunk in app.stream(
         initial_state,
         stream_mode=["updates", "messages", "custom"],
